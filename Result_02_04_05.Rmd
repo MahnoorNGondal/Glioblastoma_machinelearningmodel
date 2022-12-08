@@ -1,0 +1,822 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{bash}
+# TCGA-KICH download
+./gdc-client download -m gdc_manifest_20210927_165840.txt -t gdc-user-token.2021-09-17T14_43_59.963Z.txt.crdownload
+```
+
+
+```{r}
+# reading the libraries
+library(vroom)
+library(limma)
+library(edgeR)
+library(glmnet)
+library(factoextra)
+library(FactoMineR)
+library(caret)
+library(SummarizedExperiment)
+library(gplots)
+library(survival)
+library(survminer)
+library(RColorBrewer)
+library(gProfileR)
+library(genefilter)
+library(Seurat)
+library(SeuratDisk) #github
+library(loomR) # github
+library(ggplot2)
+library(sctransform)
+library(glmGamPoi)
+library(tidyverse)
+library(gridExtra)
+library(ggpmisc)
+library(plyr)
+library(granulator)
+library(glmnet)
+library(TCGAbiolinks)
+library(PerformanceAnalytics)
+library(rcompanion)
+library(caret)
+library(psych)
+library(sjPlot)
+library(sjlabelled)
+library(sjmisc)
+library(mlbench)
+library(randomForest)
+library(e1071)
+library(BayesPrism)
+library(forestmodel)
+
+# path to the TCGA data
+filenames <- list.files(path = '/mctp/share/users/gondal/Classes/BIOINF590', recursive = T, pattern = ".tsv", full.names = TRUE,
+                        all.files = TRUE)
+
+# Read in the TCGA data
+do.call(cbind, lapply(filenames, function(x) {
+  setNames(data.frame(read.table(x, sep = "\t")[[8]]), tools::file_path_sans_ext(basename(x)))
+})) -> gene_name
+
+
+ref <- read.table("/mctp/share/users/gondal/Classes/BIOINF590/03ddea6f-d377-4e2a-a59d-91d5c5b6e4ed.rna_seq.augmented_star_gene_counts.tsv", sep = "\t")
+ref <- ref[-c(1:5),]
+#
+# get the TCGA data into a counts matrix format
+TPM_values <- gene_name[-c(1:5),]
+TPM_values2 <- data.frame(apply(TPM_values, 2, function(x) as.numeric(as.character(x))))
+
+TPM_values2$gene_name <- ref$V2
+TPM_values2 <- TPM_values2[-which(duplicated(TPM_values2$gene_name)), ]
+rownames(TPM_values2) <- TPM_values2$gene_name
+TPM_values2$gene_name <- NULL
+
+TPM_values2 <- as.matrix(TPM_values2)
+
+```
+
+## Using cell markers from single cell to start deconvolution
+```{r}
+# read in the cell type markers
+markers_bottom50 <- read.table("/mctp/share/users/gondal/Classes/BIOINF590/Marker/findallmarkers/min_lineage_bottom50.txt", sep = "\t")
+colnames(markers_bottom50) <- gsub("^.*\\RNA.","",colnames(markers_bottom50)) 
+markers_bottom50 = markers_bottom50[!duplicated(markers_bottom50$gene),]
+rownames(markers_bottom50) <- markers_bottom50$gene
+markers_bottom50 <- markers_bottom50[,-c(1:8)]
+markers_bottom50 <- as.matrix(markers_bottom50)
+
+decon_bottom50 <- deconvolute(m = TPM_values2, markers_bottom50)
+
+# saving data for future use
+saveRDS(decon_bottom50, "/mctp/share/users/gondal/Classes/BIOINF590/output/decon_bottom50.RDS")
+decon <- readRDS("/mctp/share/users/gondal/Classes/BIOINF590/output/decon.RDS")
+
+decon <- decon
+# visualizing one of the methods
+png(file="/mctp/share/users/gondal/Classes/BIOINF590/output/propdecon.png", width=1000, height=700)
+plot_proportions(deconvoluted = decon, method = 'svr')
+dev.off()
+
+
+```
+
+## Deconvolution results
+#svr
+```{r}
+
+decon_svr_sig1 <- decon[["proportions"]][["svr_sig1"]]
+decon_svr_sig1$type_svr_sig1 <- ifelse(decon_svr_sig1$AC.like.Malignant > decon_svr_sig1$MES.like.Malignant &
+                              decon_svr_sig1$AC.like.Malignant > decon_svr_sig1$NPC.like.Malignant &
+                              decon_svr_sig1$AC.like.Malignant > decon_svr_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_svr_sig1$type_svr_sig1 <- ifelse(decon_svr_sig1$MES.like.Malignant > decon_svr_sig1$AC.like.Malignant &
+                              decon_svr_sig1$MES.like.Malignant > decon_svr_sig1$NPC.like.Malignant &
+                              decon_svr_sig1$MES.like.Malignant > decon_svr_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_svr_sig1$type_svr_sig1)
+
+decon_svr_sig1$type_svr_sig1 <- ifelse(decon_svr_sig1$NPC.like.Malignant > decon_svr_sig1$AC.like.Malignant &
+                              decon_svr_sig1$NPC.like.Malignant > decon_svr_sig1$MES.like.Malignant &
+                              decon_svr_sig1$NPC.like.Malignant > decon_svr_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_svr_sig1$type_svr_sig1)
+
+decon_svr_sig1$type_svr_sig1 <- ifelse(decon_svr_sig1$OPC.like.Malignant > decon_svr_sig1$AC.like.Malignant &
+                              decon_svr_sig1$OPC.like.Malignant > decon_svr_sig1$MES.like.Malignant &
+                              decon_svr_sig1$OPC.like.Malignant > decon_svr_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_svr_sig1$type_svr_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_svr_sig1$type_svr_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Support vector regression") +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_svr_sig1.png", width = 5, height = 4)
+```
+
+#dtangle
+```{r}
+decon_dtangle_sig1 <- decon[["proportions"]][["dtangle_sig1"]]
+decon_dtangle_sig1$type_dtangle_sig1 <- ifelse(decon_dtangle_sig1$AC.like.Malignant > decon_dtangle_sig1$MES.like.Malignant &
+                              decon_dtangle_sig1$AC.like.Malignant > decon_dtangle_sig1$NPC.like.Malignant &
+                              decon_dtangle_sig1$AC.like.Malignant > decon_dtangle_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_dtangle_sig1$type_dtangle_sig1 <- ifelse(decon_dtangle_sig1$MES.like.Malignant > decon_dtangle_sig1$AC.like.Malignant &
+                              decon_dtangle_sig1$MES.like.Malignant > decon_dtangle_sig1$NPC.like.Malignant &
+                              decon_dtangle_sig1$MES.like.Malignant > decon_dtangle_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_dtangle_sig1$type_dtangle_sig1)
+
+decon_dtangle_sig1$type_dtangle_sig1 <- ifelse(decon_dtangle_sig1$NPC.like.Malignant > decon_dtangle_sig1$AC.like.Malignant &
+                              decon_dtangle_sig1$NPC.like.Malignant > decon_dtangle_sig1$MES.like.Malignant &
+                              decon_dtangle_sig1$NPC.like.Malignant > decon_dtangle_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_dtangle_sig1$type_dtangle_sig1)
+
+decon_dtangle_sig1$type_dtangle_sig1 <- ifelse(decon_dtangle_sig1$OPC.like.Malignant > decon_dtangle_sig1$AC.like.Malignant &
+                              decon_dtangle_sig1$OPC.like.Malignant > decon_dtangle_sig1$MES.like.Malignant &
+                              decon_dtangle_sig1$OPC.like.Malignant > decon_dtangle_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_dtangle_sig1$type_dtangle_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_dtangle_sig1$type_dtangle_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Linear mixing model")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_dtangle_sig1.png", width = 5, height = 4)
+```
+
+#nnls
+```{r}
+decon_nnls_sig1 <- decon[["proportions"]][["nnls_sig1"]]
+decon_nnls_sig1$type_nnls_sig1 <- ifelse(decon_nnls_sig1$AC.like.Malignant > decon_nnls_sig1$MES.like.Malignant &
+                              decon_nnls_sig1$AC.like.Malignant > decon_nnls_sig1$NPC.like.Malignant &
+                              decon_nnls_sig1$AC.like.Malignant > decon_nnls_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_nnls_sig1$type_nnls_sig1 <- ifelse(decon_nnls_sig1$MES.like.Malignant > decon_nnls_sig1$AC.like.Malignant &
+                              decon_nnls_sig1$MES.like.Malignant > decon_nnls_sig1$NPC.like.Malignant &
+                              decon_nnls_sig1$MES.like.Malignant > decon_nnls_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_nnls_sig1$type_nnls_sig1)
+
+decon_nnls_sig1$type_nnls_sig1 <- ifelse(decon_nnls_sig1$NPC.like.Malignant > decon_nnls_sig1$AC.like.Malignant &
+                              decon_nnls_sig1$NPC.like.Malignant > decon_nnls_sig1$MES.like.Malignant &
+                              decon_nnls_sig1$NPC.like.Malignant > decon_nnls_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_nnls_sig1$type_nnls_sig1)
+
+decon_nnls_sig1$type_nnls_sig1 <- ifelse(decon_nnls_sig1$OPC.like.Malignant > decon_nnls_sig1$AC.like.Malignant &
+                              decon_nnls_sig1$OPC.like.Malignant > decon_nnls_sig1$MES.like.Malignant &
+                              decon_nnls_sig1$OPC.like.Malignant > decon_nnls_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_nnls_sig1$type_nnls_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_nnls_sig1$type_nnls_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Non-negative least squares")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_nnls_sig1.png", width = 5, height = 4)
+```
+
+#ols
+```{r}
+decon_ols_sig1 <- decon[["proportions"]][["ols_sig1"]]
+decon_ols_sig1$type_ols_sig1 <- ifelse(decon_ols_sig1$AC.like.Malignant > decon_ols_sig1$MES.like.Malignant &
+                              decon_ols_sig1$AC.like.Malignant > decon_ols_sig1$NPC.like.Malignant &
+                              decon_ols_sig1$AC.like.Malignant > decon_ols_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_ols_sig1$type_ols_sig1 <- ifelse(decon_ols_sig1$MES.like.Malignant > decon_ols_sig1$AC.like.Malignant &
+                              decon_ols_sig1$MES.like.Malignant > decon_ols_sig1$NPC.like.Malignant &
+                              decon_ols_sig1$MES.like.Malignant > decon_ols_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_ols_sig1$type_ols_sig1)
+
+decon_ols_sig1$type_ols_sig1 <- ifelse(decon_ols_sig1$NPC.like.Malignant > decon_ols_sig1$AC.like.Malignant &
+                              decon_ols_sig1$NPC.like.Malignant > decon_ols_sig1$MES.like.Malignant &
+                              decon_ols_sig1$NPC.like.Malignant > decon_ols_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_ols_sig1$type_ols_sig1)
+
+decon_ols_sig1$type_ols_sig1 <- ifelse(decon_ols_sig1$OPC.like.Malignant > decon_ols_sig1$AC.like.Malignant &
+                              decon_ols_sig1$OPC.like.Malignant > decon_ols_sig1$MES.like.Malignant &
+                              decon_ols_sig1$OPC.like.Malignant > decon_ols_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_ols_sig1$type_ols_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_ols_sig1$type_ols_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Ordinary least squares")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_ols_sig1.png", width = 5, height = 4)
+```
+
+#qprog
+```{r}
+decon_qprog_sig1 <- decon[["proportions"]][["qprog_sig1"]]
+decon_qprog_sig1$type_qprog_sig1 <- ifelse(decon_qprog_sig1$AC.like.Malignant > decon_qprog_sig1$MES.like.Malignant &
+                              decon_qprog_sig1$AC.like.Malignant > decon_qprog_sig1$NPC.like.Malignant &
+                              decon_qprog_sig1$AC.like.Malignant > decon_qprog_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_qprog_sig1$type_qprog_sig1 <- ifelse(decon_qprog_sig1$MES.like.Malignant > decon_qprog_sig1$AC.like.Malignant &
+                              decon_qprog_sig1$MES.like.Malignant > decon_qprog_sig1$NPC.like.Malignant &
+                              decon_qprog_sig1$MES.like.Malignant > decon_qprog_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_qprog_sig1$type_qprog_sig1)
+
+decon_qprog_sig1$type_qprog_sig1 <- ifelse(decon_qprog_sig1$NPC.like.Malignant > decon_qprog_sig1$AC.like.Malignant &
+                              decon_qprog_sig1$NPC.like.Malignant > decon_qprog_sig1$MES.like.Malignant &
+                              decon_qprog_sig1$NPC.like.Malignant > decon_qprog_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_qprog_sig1$type_qprog_sig1)
+
+decon_qprog_sig1$type_qprog_sig1 <- ifelse(decon_qprog_sig1$OPC.like.Malignant > decon_qprog_sig1$AC.like.Malignant &
+                              decon_qprog_sig1$OPC.like.Malignant > decon_qprog_sig1$MES.like.Malignant &
+                              decon_qprog_sig1$OPC.like.Malignant > decon_qprog_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_qprog_sig1$type_qprog_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_qprog_sig1$type_qprog_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Quadratic programming\nwithout constraints")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_qprog_sig1.png", width = 5, height = 4)
+```
+
+#qprogwc
+```{r}
+decon_qprogwc_sig1 <- decon[["proportions"]][["qprogwc_sig1"]]
+decon_qprogwc_sig1$type_qprogwc_sig1 <- ifelse(decon_qprogwc_sig1$AC.like.Malignant > decon_qprogwc_sig1$MES.like.Malignant &
+                              decon_qprogwc_sig1$AC.like.Malignant > decon_qprogwc_sig1$NPC.like.Malignant &
+                              decon_qprogwc_sig1$AC.like.Malignant > decon_qprogwc_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_qprogwc_sig1$type_qprogwc_sig1 <- ifelse(decon_qprogwc_sig1$MES.like.Malignant > decon_qprogwc_sig1$AC.like.Malignant &
+                              decon_qprogwc_sig1$MES.like.Malignant > decon_qprogwc_sig1$NPC.like.Malignant &
+                              decon_qprogwc_sig1$MES.like.Malignant > decon_qprogwc_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_qprogwc_sig1$type_qprogwc_sig1)
+
+decon_qprogwc_sig1$type_qprogwc_sig1 <- ifelse(decon_qprogwc_sig1$NPC.like.Malignant > decon_qprogwc_sig1$AC.like.Malignant &
+                              decon_qprogwc_sig1$NPC.like.Malignant > decon_qprogwc_sig1$MES.like.Malignant &
+                              decon_qprogwc_sig1$NPC.like.Malignant > decon_qprogwc_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_qprogwc_sig1$type_qprogwc_sig1)
+
+decon_qprogwc_sig1$type_qprogwc_sig1 <- ifelse(decon_qprogwc_sig1$OPC.like.Malignant > decon_qprogwc_sig1$AC.like.Malignant &
+                              decon_qprogwc_sig1$OPC.like.Malignant > decon_qprogwc_sig1$MES.like.Malignant &
+                              decon_qprogwc_sig1$OPC.like.Malignant > decon_qprogwc_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_qprogwc_sig1$type_qprogwc_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_qprogwc_sig1$type_qprogwc_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Quadratic programming with\nnon-negativity and sum-to-one constraint")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_qprogwc_sig1.png", width = 5, height = 4)
+```
+
+
+#rls
+```{r}
+decon_rls_sig1 <- decon[["proportions"]][["rls_sig1"]]
+decon_rls_sig1$type_rls_sig1 <- ifelse(decon_rls_sig1$AC.like.Malignant > decon_rls_sig1$MES.like.Malignant &
+                              decon_rls_sig1$AC.like.Malignant > decon_rls_sig1$NPC.like.Malignant &
+                              decon_rls_sig1$AC.like.Malignant > decon_rls_sig1$OPC.like.Malignant, "AC.like.Malignant", NA )
+
+decon_rls_sig1$type_rls_sig1 <- ifelse(decon_rls_sig1$MES.like.Malignant > decon_rls_sig1$AC.like.Malignant &
+                              decon_rls_sig1$MES.like.Malignant > decon_rls_sig1$NPC.like.Malignant &
+                              decon_rls_sig1$MES.like.Malignant > decon_rls_sig1$OPC.like.Malignant, "MES.like.Malignant", decon_rls_sig1$type_rls_sig1)
+
+decon_rls_sig1$type_rls_sig1 <- ifelse(decon_rls_sig1$NPC.like.Malignant > decon_rls_sig1$AC.like.Malignant &
+                              decon_rls_sig1$NPC.like.Malignant > decon_rls_sig1$MES.like.Malignant &
+                              decon_rls_sig1$NPC.like.Malignant > decon_rls_sig1$OPC.like.Malignant, "NPC.like.Malignant", decon_rls_sig1$type_rls_sig1)
+
+decon_rls_sig1$type_rls_sig1 <- ifelse(decon_rls_sig1$OPC.like.Malignant > decon_rls_sig1$AC.like.Malignant &
+                              decon_rls_sig1$OPC.like.Malignant > decon_rls_sig1$MES.like.Malignant &
+                              decon_rls_sig1$OPC.like.Malignant > decon_rls_sig1$NPC.like.Malignant, "OPC.like.Malignant", decon_rls_sig1$type_rls_sig1)
+
+table_decon_svr_sig1 <- as.data.frame(table(decon_rls_sig1$type_rls_sig1))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_svr_sig1 <- table_decon_svr_sig1 %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_svr_sig1)[names(table_decon_svr_sig1) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_svr_sig1, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using Re-weighted least squares")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_decon_rls_sig1.png", width = 5, height = 4)
+```
+
+#combining the results
+```{r}
+decon_svr_sig1a <- as.data.frame(decon_svr_sig1[,-c(1:9)])
+rownames(decon_svr_sig1a) <- rownames(decon_svr_sig1)
+
+decon_dtangle_sig1a <- as.data.frame(decon_dtangle_sig1[,-c(1:9)])
+rownames(decon_dtangle_sig1a) <- rownames(decon_dtangle_sig1)
+
+decon_nnls_sig1a <- as.data.frame(decon_nnls_sig1[,-c(1:9)])
+rownames(decon_nnls_sig1a) <- rownames(decon_nnls_sig1)
+
+decon_ols_sig1a <- as.data.frame(decon_ols_sig1[,-c(1:9)])
+rownames(decon_ols_sig1a) <- rownames(decon_ols_sig1)
+
+decon_qprog_sig1a <- as.data.frame(decon_qprog_sig1[,-c(1:9)])
+rownames(decon_qprog_sig1a) <- rownames(decon_qprog_sig1)
+
+decon_qprogwc_sig1a <- as.data.frame(decon_qprogwc_sig1[,-c(1:9)])
+rownames(decon_qprogwc_sig1a) <- rownames(decon_qprogwc_sig1)
+
+decon_rls_sig1a <- as.data.frame(decon_rls_sig1[,-c(1:9)])
+rownames(decon_rls_sig1a) <- rownames(decon_rls_sig1)
+
+decon_combine <- merge(decon_svr_sig1a, decon_dtangle_sig1a, by = "row.names")
+decon_combine <- merge(decon_combine, decon_nnls_sig1a, by.x = "Row.names", by.y = "row.names")
+decon_combine <- merge(decon_combine, decon_ols_sig1a, by.x = "Row.names", by.y = "row.names")
+decon_combine <- merge(decon_combine, decon_qprog_sig1a,by.x = "Row.names", by.y = "row.names")
+#decon_combine <- merge(decon_combine, decon_qprogwc_sig1a,by.x = "Row.names", by.y = "row.names") # did not include qprogwc because the results were not useful for our data
+decon_combine <- merge(decon_combine, decon_rls_sig1a, by.x = "Row.names", by.y = "row.names")
+
+colnames(decon_combine) <- c("ID", "svr", "dtangle", "nnls", "ols", "qprog", "rls")
+
+rownames(decon_combine) <- decon_combine$ID
+decon_combine$ID <- NULL
+
+decon_combine_t <- as.data.frame(t(decon_combine))
+decon_combine_t_MES <- t(as.data.frame(colSums(decon_combine_t == "MES.like.Malignant", na.rm = T)))
+rownames(decon_combine_t_MES) <- "MES"
+decon_combine_t_AC <- t(as.data.frame(colSums(decon_combine_t == "AC.like.Malignant", na.rm = T)))
+rownames(decon_combine_t_AC) <- "AC"
+decon_combine_t_NPC <- t(as.data.frame(colSums(decon_combine_t == "NPC.like.Malignant", na.rm = T)))
+rownames(decon_combine_t_NPC) <- "NPC"
+decon_combine_t_OPC <- t(as.data.frame(colSums(decon_combine_t == "OPC.like.Malignant", na.rm = T)))
+rownames(decon_combine_t_OPC) <- "OPC"
+
+decon_combine_t_C <- rbind(decon_combine_t, decon_combine_t_MES, decon_combine_t_AC, decon_combine_t_NPC, decon_combine_t_OPC)
+decon_combine_t_C_t <- as.data.frame(t(decon_combine_t_C))
+
+# seeing if at least three methods agree on the result than assign it
+decon_combine_t_C_t$subtype <- ifelse(decon_combine_t_C_t$MES >= 3, "MES", NA)
+decon_combine_t_C_t$subtype <- ifelse(decon_combine_t_C_t$AC >= 3, "AC", decon_combine_t_C_t$subtype)
+decon_combine_t_C_t$subtype <- ifelse(decon_combine_t_C_t$NPC >= 3, "NPC", decon_combine_t_C_t$subtype)
+decon_combine_t_C_t$subtype <- ifelse(decon_combine_t_C_t$OPC >= 3, "OPC", decon_combine_t_C_t$subtype)
+
+
+table_decon_combine_t_C_t <- as.data.frame(table(decon_combine_t_C_t$subtype))
+
+mycols <- c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF")
+
+table_decon_combine_t_C_t <- table_decon_combine_t_C_t %>%
+  arrange(desc(Var1)) %>%
+  mutate(lab.ypos = cumsum(Freq) - 0.5*Freq)
+
+names(table_decon_combine_t_C_t)[names(table_decon_combine_t_C_t) == 'Var1'] <- 'Subtype'
+
+ggplot(table_decon_combine_t_C_t, aes(x = "", y = Freq, fill = Subtype)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = Freq), color = "black")+
+  scale_fill_manual(values = mycols) +
+  theme_void() +ggtitle("Using three methods results")  +
+  theme(legend.text = element_text(size=15))+
+  theme(legend.title = element_text(size=15))
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_03_01_05_22/table_combined.png", width = 5, height = 4)
+```
+
+```{r}
+write.csv(TPM_values2,"/mctp/share/users/gondal/Classes/BIOINF590/output/version_01_11_20_22/TPM_values2.csv", row.names = FALSE)
+```
+
+## Surival analysis:
+# downloading and using clinical data from TCGA
+```{r}
+
+# downloading the clinical data for GBM from TCGA
+GDCprojects = getGDCprojects()
+
+head(GDCprojects[c("project_id", "name")])
+
+TCGAbiolinks:::getProjectSummary("TCGA-GBM")
+
+	query_TCGA = GDCquery(
+  project = "TCGA-GBM",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+  access = "open", 
+  data.type = "Gene Expression Quantification")
+	
+GBM_res = getResults(query_TCGA)
+
+GDCdownload(query = query_TCGA)
+
+######################
+
+query <- GDCquery(
+    project = "TCGA-GBM",
+    data.category = "Clinical",
+    data.type = "Clinical Supplement",
+    data.format = "BCR XML",
+    barcode = c(GBM_res$cases.submitter_id)
+)
+GDCdownload(query)
+drug <- GDCprepare_clinic(query,"follow_up")
+drug_GBM <- merge(drug, GBM_res, by.x = "bcr_patient_barcode", by.y = "cases.submitter_id")
+
+# Putting the clinical data in a format useful for the analysis 
+drug_GBM$vitalS <- ifelse(drug_GBM$vital_status == "Alive", 1, 0)
+
+drug_GBM$file_name_update <- gsub("\\..*","",drug_GBM$file_name)
+decon_combine_t_C_t$file_name_update <- gsub("\\.rna_seq.augmented_star_gene_counts*","", rownames(decon_combine_t_C_t))
+
+# merging the data with clinical and expression
+decon_combine_t_C_t$file_name_update  <- sub('\\.', '-', decon_combine_t_C_t$file_name_update )
+decon_combine_t_C_t$file_name_update  <- sub('\\.', '-', decon_combine_t_C_t$file_name_update )
+decon_combine_t_C_t$file_name_update  <- sub('\\.', '-', decon_combine_t_C_t$file_name_update )
+decon_combine_t_C_t$file_name_update  <- sub('\\.', '-', decon_combine_t_C_t$file_name_update )
+
+decon_combine_t_C_t_merge <- merge(decon_combine_t_C_t, drug_GBM, by = "file_name_update")
+decon_combine_t_C_t_merge <- decon_combine_t_C_t_merge[!is.na(decon_combine_t_C_t_merge$subtype), ]
+
+
+fit = survfit(Surv(days_to_last_followup, vitalS) ~ subtype, data=decon_combine_t_C_t_merge)
+
+decon_svr_sig1$file_name_update <- rownames(decon_svr_sig1)
+decon_svr_sig1$file_name_update <-  gsub("\\.rna_seq.augmented_star_gene_counts*","",decon_svr_sig1$file_name_update)
+decon_svr_sig1$file_name_update  <- sub('\\.', '-', decon_svr_sig1$file_name_update )
+decon_svr_sig1$file_name_update  <- sub('\\.', '-', decon_svr_sig1$file_name_update )
+decon_svr_sig1$file_name_update  <- sub('\\.', '-', decon_svr_sig1$file_name_update )
+decon_svr_sig1$file_name_update  <- sub('\\.', '-', decon_svr_sig1$file_name_update )
+
+decon_combine_t_C_t_merge_merge <- merge(decon_combine_t_C_t_merge, decon_svr_sig1, by = "file_name_update")
+
+# fit = survfit(Surv(days_to_last_followup, vitalS) ~ subtype + CD8Tex, data=decon_combine_t_C_t_merge_merge)
+# 
+# decon_combine_t_C_t_merge_merge$CD8Tex_status <- ifelse(decon_combine_t_C_t_merge_merge$CD8Tex > -12, "CD8Tex_pos", "CD8Tex_neg")
+# 
+# fit_CD8 = survfit(Surv(days_to_last_followup, vitalS) ~ subtype + CD8Tex_status, data=decon_combine_t_C_t_merge_merge)
+# 
+# model <- coxph( Surv(days_to_last_followup, vitalS) ~ subtype + radiation_therapy,
+#                 data = decon_combine_t_C_t_merge_merge)
+# forest_model(model)
+# 
+# ggsurvplot(fit_CD8, data=decon_combine_t_C_t_merge_merge, pval = T)
+# ggsurvplot(fit_CD8, data=decon_combine_t_C_t_merge_merge, pval=T, risk.table=T, risk.table.col="strata")
+
+## adding expression data
+TPM_values2_t_df <- as.data.frame(TPM_values2_t)
+TPM_values2_t_df$file_name_update <- rownames(TPM_values2_t_df)
+TPM_values2_t_df$file_name_update <-  gsub("\\.rna_seq.augmented_star_gene_counts*","",TPM_values2_t_df$file_name_update)
+TPM_values2_t_df$file_name_update  <- sub('\\.', '-', TPM_values2_t_df$file_name_update )
+TPM_values2_t_df$file_name_update  <- sub('\\.', '-', TPM_values2_t_df$file_name_update )
+TPM_values2_t_df$file_name_update  <- sub('\\.', '-', TPM_values2_t_df$file_name_update )
+TPM_values2_t_df$file_name_update  <- sub('\\.', '-', TPM_values2_t_df$file_name_update )
+TPM_values2_t_merged <- merge(decon_combine_t_C_t_merge_merge, TPM_values2_t_df, by = "file_name_update")
+
+
+fit_CBX2 = survfit(Surv(days_to_last_followup, vitalS) ~ subtype + CBX2, data=TPM_values2_t_merged)
+ggsurvplot(fit_CBX2, data=TPM_values2_t_merged, pval = T)
+
+
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_04_01_06_22/table_survival.png", width = 12, height = 4)
+```
+
+
+## Survival analysis
+# Double-checking survival results from another way to download clinical data to be sure
+```{r}
+# the clinical 
+clinical <- read.csv("/mctp/share/users/gondal/Classes/BIOINF590/Reference/clinical.tsv",
+         header = TRUE,
+         sep = "\t")
+
+clinical_merge <- merge(decon_combine_t_C_t_merge_merge, clinical, by.y = "case_submitter_id", by.x = "bcr_patient_barcode")
+
+TPM_values2_t_merged_clinical_merge <- merge(clinical_merge, TPM_values2_t_df, by = "file_name_update")
+
+fit_CBX2 = survfit(Surv(days_to_last_followup, vitalS) ~ subtype, data=TPM_values2_t_merged_clinical_merge)
+ggsurvplot(fit_CBX2, data=TPM_values2_t_merged_clinical_merge, pval = T, conf.int = TRUE, risk.table=T, risk.table.col="strata")
+
+
+TPM_values2_t_merged_clinical_merge$days_to_last_followup_death <- ifelse(TPM_values2_t_merged_clinical_merge$vital_status.x == "Alive", 
+                                                                          TPM_values2_t_merged_clinical_merge$days_to_last_follow_up, 
+                                                                          TPM_values2_t_merged_clinical_merge$days_to_death.x)
+
+# using mean values to assign high and low status
+TPM_values2_t_merged_clinical_merge$CBX2_status <- ifelse(TPM_values2_t_merged_clinical_merge$CBX2 > 3.3, "CBX2_high", "CBX2_low")
+TPM_values2_t_merged_clinical_merge$RUNX1_status <- ifelse(TPM_values2_t_merged_clinical_merge$RUNX1 > 2.8, "RUNX1_high", "RUNX1_low")
+
+TPM_values2_t_merged_clinical_merge$subtype <- as.factor(TPM_values2_t_merged_clinical_merge$subtype)
+
+TPM_values2_t_merged_clinical_merge$days_to_last_followup_death <- as.numeric(TPM_values2_t_merged_clinical_merge$days_to_last_followup_death)
+
+fit_CBX2 = survfit(Surv(days_to_last_followup_death, vitalS) ~  CBX2_status +  RUNX1_status + gender, data=TPM_values2_t_merged_clinical_merge)
+ggsurvplot(fit_CBX2, data=TPM_values2_t_merged_clinical_merge, pval = T, conf.int = TRUE)
+ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_04_01_06_22/table_survival6.png", width = 15, height = 8)
+
+ggsurvplot_facet(fit_CBX2, data=TPM_values2_t_merged_clinical_merge, facet.by = "gender")
+
+model <- coxph( Surv(days_to_last_followup_death, vitalS) ~ subtype + CBX2_status,
+                data = TPM_values2_t_merged_clinical_merge)
+forest_model(model)
+```
+
+
+## Using BayesPrism
+```{r}
+# load("/mctp/share/users/gondal/Classes/BIOINF590/Marker/tutorial.gbm.rdata")
+
+count_seurat <- readRDS("/mctp/share/users/gondal/Classes/BIOINF590/Reference/count_seurat.rds")
+sc.dat_GBM <- t(as.matrix(count_seurat@assays$RNA@data))
+
+cell.type.labels_GBM <- count_seurat@meta.data$Celltype..minor.lineage.
+cell.state.labels_GBM <- count_seurat@meta.data$Celltype..major.lineage.
+
+png(file="/mctp/share/users/gondal/Classes/BIOINF590/output/heatmap.png", width=1000, height=700)
+plot.cor.phi (input=sc.dat_GBM,
+ input.labels=cell.state.labels_GBM,
+title="cell state correlation",
+#pdf.prefix="gbm.cor.cs",
+cexRow=0.8, cexCol=0.8,
+ margins=c(2,2))
+dev.off()
+```
+
+## extracing BayesPrism results
+```{r}
+TPM_values2_t <- t(TPM_values2)
+
+myPrism <- new.prism(
+ reference=sc.dat_GBM,
+ mixture=TPM_values2_t,
+ input.type="count.matrix",
+ cell.type.labels = cell.state.labels_GBM,
+ cell.state.labels = cell.type.labels_GBM,
+ key="Malignant",
+ outlier.cut=0.01,
+ outlier.fraction=0.1,
+)
+
+
+bp.res <- run.prism(prism = myPrism, n.cores=15)
+saveRDS(bp.res,"/mctp/share/users/gondal/Classes/BIOINF590/Reference/bp.res.RDS")
+bp.res <- readRDS("/mctp/share/users/gondal/Classes/BIOINF590/Reference/bp.res.RDS")
+
+
+theta <- get.fraction (bp=bp.res,
+ which.theta="final",
+ state.or.type="type")
+
+Z.tumor_AC <- get.exp (bp=bp.res,
+ state.or.type="type",
+cell.name="AC-like Malignant")
+
+Z.tumor_NPC <- get.exp (bp=bp.res,
+ state.or.type="type",
+cell.name="NPC-like Malignant")
+
+Z.tumor_OPC <- get.exp (bp=bp.res,
+ state.or.type="type",
+cell.name="OPC-like Malignant")
+
+Z.tumor_MES <- get.exp (bp=bp.res,
+ state.or.type="type",
+cell.name="MES-like Malignant")
+
+
+Z.tumor_AC_imp_genes <- as.data.frame(Z.tumor_AC[,c("CDK4", "EGFR", "PDGFRA", "NF1")])
+Z.tumor_AC_imp_genes$subtype <- "AC"
+
+Z.tumor_NPC_imp_genes <- as.data.frame(Z.tumor_NPC[,c("CDK4", "EGFR", "PDGFRA", "NF1")])
+Z.tumor_NPC_imp_genes$subtype <- "NPC"
+
+Z.tumor_OPC_imp_genes <- as.data.frame(Z.tumor_OPC[,c("CDK4", "EGFR", "PDGFRA", "NF1")])
+Z.tumor_OPC_imp_genes$subtype <- "OPC"
+
+Z.tumor_MES_imp_genes <- as.data.frame(Z.tumor_MES[,c("CDK4", "EGFR", "PDGFRA", "NF1")])
+Z.tumor_MES_imp_genes$subtype <- "MES"
+
+Z.tumor <- rbind(Z.tumor_AC_imp_genes, Z.tumor_NPC_imp_genes, Z.tumor_OPC_imp_genes, Z.tumor_MES_imp_genes )
+Z.tumor_melt <- melt(Z.tumor)
+
+# looking at some of the known markers
+  b <- ggboxplot(Z.tumor_melt, x = "subtype", y = "value",  fill = "subtype")    + ylab("BayesPrism estimates")  +
+  xlab(NULL)  +theme(axis.text.x=element_text(size=20))+theme(axis.text.y=element_text(size=20)) + theme(legend.title = element_text(size=20))+
+  theme(legend.text = element_text(size=20)) +                                                               # Change font size
+  theme(strip.text.x = element_text(size = 20)) + theme(text = element_text(size = 20))  + theme(legend.position = "none") + theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1)) +theme(axis.text.y=element_text(size=20))  + theme(legend.title = element_text(size=20)) + xlab(NULL)  + facet_wrap( ~ variable, ncol = 5, scales = "free")+
+       theme(axis.text.x=element_text(size=15, angle=90,hjust=0.95,vjust=0.2))
+ b
+  ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_04_01_06_22/table_box.png", width = 10, height = 4)
+ 
+ ##############
+# top 30
+markers <- c("FOSL1", "CBX2", "SOX8", "RUNX1", "SOX4", "THRA", "HES6", "CXXC4", "CEBPD", "SP100", "SP110", "ZNF74", "IRF1", "MXD4", "KLF6", "RELB", "BHLHE40", "ZBTB18", "ZHX2", "ZNF34" , "MYCL", "SP140L", "YBX3", "ZNF778", "ZNF707" , "PBX1", "BCL11A", "ZNF362", "FOXO6", "SIM2")
+ 
+ 
+ Z.tumor_AC_imp_genes <- as.data.frame(Z.tumor_AC[,c(markers)])
+Z.tumor_AC_imp_genes$subtype <- "AC"
+
+Z.tumor_NPC_imp_genes <- as.data.frame(Z.tumor_NPC[,c(markers)])
+Z.tumor_NPC_imp_genes$subtype <- "NPC"
+
+Z.tumor_OPC_imp_genes <- as.data.frame(Z.tumor_OPC[,c(markers)])
+Z.tumor_OPC_imp_genes$subtype <- "OPC"
+
+Z.tumor_MES_imp_genes <- as.data.frame(Z.tumor_MES[,c(markers)])
+Z.tumor_MES_imp_genes$subtype <- "MES"
+
+Z.tumor <- rbind(Z.tumor_AC_imp_genes, Z.tumor_NPC_imp_genes, Z.tumor_OPC_imp_genes, Z.tumor_MES_imp_genes )
+Z.tumor_melt <- melt(Z.tumor)
+
+  b <- ggboxplot(Z.tumor_melt, x = "subtype", y = "value",  fill = "subtype")    + ylab("BayesPrism estimates")  +
+  xlab(NULL)  +theme(axis.text.x=element_text(size=20))+theme(axis.text.y=element_text(size=20)) + theme(legend.title = element_text(size=20))+
+  theme(legend.text = element_text(size=20)) +                                                               # Change font size
+  theme(strip.text.x = element_text(size = 20)) + theme(text = element_text(size = 20))  + theme(legend.position = "none") + theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1)) +theme(axis.text.y=element_text(size=20))  + theme(legend.title = element_text(size=20)) + xlab(NULL)  + facet_wrap( ~ variable, ncol = 5, scales = "free")+
+       theme(axis.text.x=element_text(size=15, angle=90,hjust=0.95,vjust=0.2))
+ b
+ 
+ 
+ ggsave("/mctp/share/users/gondal/Classes/BIOINF590/output/version_04_01_06_22/table_box2.png", width = 25, height = 14)
+```
+
+## Machine learning - performing feature selection from Boruta
+```{r}
+decon_combine_t_C_t_updated <- decon_combine_t_C_t[!is.na(decon_combine_t_C_t$subtype), ]
+
+TPM_values2_merged <- merge(TPM_values2_t, decon_combine_t_C_t_updated, by = 'row.names')
+TPM_values2_merged_sel <- TPM_values2_merged[,-c(1, 59429:59438)]
+TPM_values2_merged_sel$subtype <- as.factor(TPM_values2_merged_sel$subtype)
+###
+# Feature selection
+##
+
+boruta <- Boruta(subtype ~ ., data = TPM_values2_merged_sel_tf, doTrace = 2, maxRuns = 800)
+print(boruta)
+plot(boruta, las = 2, cex.axis = 0.7)
+plotImpHistory(boruta)
+getNonRejectedFormula(boruta)
+getConfirmedFormula(boruta)
+
+## Tentative Fix
+bor <- TentativeRoughFix(boruta)
+print(bor)
+attStats(boruta)
+
+## Data Partition
+set.seed(1234)
+size <- floor(0.6 * nrow(TPM_values2_merged_sel_tf))
+train_ind <- sample(seq_len(nrow(TPM_values2_merged_sel_tf)), size = size)
+train <- TPM_values2_merged_sel_tf[train_ind, ]
+test <- TPM_values2_merged_sel_tf[-train_ind, ]
+write.csv(train,"/mctp/share/users/gondal/Classes/BIOINF590/output/version_01_11_20_22/train.csv", row.names = FALSE)
+train <- read.csv("/mctp/share/users/gondal/Classes/BIOINF590/output/version_01_11_20_22/train.csv", 
+         header = TRUE,
+         sep = ",")
+train$subtype <- as.factor(train$subtype)
+#test
+write.csv(test,"/mctp/share/users/gondal/Classes/BIOINF590/output/version_01_11_20_22/test.csv", row.names = FALSE)
+test <- read.csv("/mctp/share/users/gondal/Classes/BIOINF590/output/version_01_11_20_22/test.csv", 
+         header = TRUE,
+         sep = ",")
+test$subtype <- as.factor(test$subtype)
+
+## Random Forest Model
+rf_1335 <- randomForest(subtype ~ ., data = train)
+
+rf_getNonRejectedFormula <- randomForest(subtype ~ ASCL1 + BACH1 + BCL11A + BHLHE40 + CBX2 + CEBPB + CEBPD + 
+    CREBL2 + CSRNP3 + CXXC4 + DLX6 + DMBX1 + E2F2 + FOSL1 + FOSL2 + 
+    FOXO6 + GATAD2B + GRHL1 + HES2 + HES5 + HES6 + HIC2 + HIVEP3 + 
+    HOXA11 + HOXD3 + IRF1 + IRF2 + JUNB + KLF12 + KLF6 + LHX1 + 
+    LHX4 + MAFF + MXD4 + MYB + MYCL + MYCN + MYT1 + NFE2L2 + 
+    NHLH1 + NR0B1 + OLIG1 + OLIG2 + ONECUT2 + PATZ1 + PBX1 + 
+    PCGF2 + POU2F1 + POU6F1 + PTF1A + RBPJ + RELB + RUNX1 + RXRB + 
+    SALL3 + SATB1 + SETDB1 + SIM2 + SNAI1 + SOX10 + SOX11 + SOX4 + 
+    SOX6 + SOX8 + SP100 + SP110 + SP140L + SREBF2 + STAT3 + TCF7L2 + 
+    TEAD2 + TFAP2A + TFAP4 + THRA + VAX2 + VDR + VENTX + YBX1 + 
+    YBX3 + ZBED4 + ZBTB12 + ZBTB17 + ZBTB18 + ZBTB38 + ZBTB5 + 
+    ZBTB8B + ZC3H8 + ZEB2 + ZHX2 + ZKSCAN7 + ZNF121 + ZNF217 + 
+    ZNF248 + ZNF250 + ZNF286A + ZNF34 + ZNF358 + ZNF362 + ZNF391 + 
+    ZNF396 + ZNF431 + ZNF445 + ZNF462 + ZNF48 + ZNF493 + ZNF512 + 
+    ZNF513 + ZNF519 + ZNF562 + ZNF682 + ZNF7 + ZNF707 + ZNF711 + 
+    ZNF74 + ZNF740 + ZNF774 + ZNF778 + ZNF8 + ZSCAN2, data = train)
+
+
+rf_ConfirmedFormula <- randomForest(subtype ~ ASCL1 + BACH1 + BCL11A + BHLHE40 + CBX2 + CEBPB + CEBPD + 
+    CSRNP3 + CXXC4 + DMBX1 + E2F2 + FOSL1 + FOSL2 + FOXO6 + GATAD2B + 
+    GRHL1 + HES2 + HES5 + HES6 + HOXA11 + HOXD3 + IRF1 + IRF2 + 
+    JUNB + KLF12 + KLF6 + LHX4 + MAFF + MXD4 + MYCL + MYT1 + 
+    NFE2L2 + OLIG2 + PATZ1 + PBX1 + PCGF2 + POU2F1 + POU6F1 + 
+    PTF1A + RBPJ + RELB + RUNX1 + RXRB + SALL3 + SATB1 + SIM2 + 
+    SNAI1 + SOX10 + SOX11 + SOX4 + SOX6 + SOX8 + SP100 + SP110 + 
+    SP140L + SREBF2 + STAT3 + TEAD2 + TFAP2A + TFAP4 + THRA + 
+    VAX2 + VDR + VENTX + YBX1 + YBX3 + ZBTB12 + ZBTB18 + ZBTB8B + 
+    ZC3H8 + ZHX2 + ZKSCAN7 + ZNF121 + ZNF248 + ZNF250 + ZNF286A + 
+    ZNF34 + ZNF362 + ZNF396 + ZNF431 + ZNF462 + ZNF48 + ZNF519 + 
+    ZNF682 + ZNF7 + ZNF707 + ZNF74 + ZNF740 + ZNF778 + ZNF8 + 
+    ZSCAN2, data = train)
+
+
+  
+rf_ConfirmedFormula_top30 <- randomForest(subtype ~  FOSL1 + CBX2 + SOX8 + RUNX1 + SOX4+ +  THRA + HES6 + CXXC4 + CEBPD + SP100 + SP110 + ZNF74 + IRF1 + MXD4 + KLF6 + RELB + BHLHE40+  ZBTB18 + ZHX2 +  ZNF34 + MYCL +  SP140L + YBX3 + ZNF778 +  ZNF707 +  PBX1 +  BCL11A +  ZNF362  + FOXO6 + SIM2, data = train)
+ 
+expansion$results
+summary(expansion)
+#plot(lm$finalModel)
+plot(varImp(rf_ConfirmedFormula))
+
+## Prediction & Confusion Matrix 
+p <- predict(rf_ConfirmedFormula_top30, test)
+confusionMatrix(p, test$subtype)
+
+
+```
+
