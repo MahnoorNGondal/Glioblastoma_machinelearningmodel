@@ -1,4 +1,5 @@
 # GBM_BIOINF590
+## A systematic analysis to perform robust Glioblastoma subtypes deconvolution from single cell data towards extracting prognostic biomarkers for clinical associations
 BIOINF 590 project by Mahnoor Naseer Gondal, Behnoush Rostami, Christa Ventresca
 
 Glioblastoma is an incurable and poorly understood tumor, with diverse genetic, epigenetic, and developmental factors contributing to its progression. However, their precise characterization remains a challenge. The molecular characteristics of glioblastoma are unique and the cancer can be divided into three subtypes. The disambiguation of these subtypes is difficult with only bulk data. An approach using single cell technology allows us to better understand cellular heterogeneity within an individual at the single cell level. However, as single cell data can be expensive to generate and usually contains fewer samples, it is necessary to bridge the gap between single cell and bulk data to classify glioblastoma patients more accurately when analyzing bulk data.
